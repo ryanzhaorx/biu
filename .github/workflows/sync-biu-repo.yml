@@ -1,0 +1,68 @@
+name: Sync BIU Repository
+
+on:
+  schedule:
+    # 每2小时执行一次 (在每小时的0分执行)
+    - cron: '0 */2 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  sync-repo:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Fetch data from source repository
+        run: |
+          # 添加远程源仓库
+          git remote add source https://github.com/wood3n/biu.git || true
+          
+          # 获取源仓库的所有分支
+          git fetch source
+
+      - name: Manage backup branches
+        run: |
+          # 删除旧的备份分支，只保留最新的3个
+          git fetch origin
+          backup_branches=$(git branch -r | grep "origin/backup-" | sort -V | head -n -3)
+          for branch in $backup_branches; do
+            branch_name=${branch#origin/}
+            if [ ! -z "$branch_name" ]; then
+              git push origin --delete "$branch_name"
+              echo "Deleted old backup branch: $branch_name"
+            fi
+          done || true
+          
+          # 创建新的备份分支
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BACKUP_BRANCH="backup-$TIMESTAMP"
+          git checkout -b "$BACKUP_BRANCH"
+          git push origin "$BACKUP_BRANCH"
+          echo "Backup created as branch: $BACKUP_BRANCH"
+          
+      - name: Replace master branch with source data
+        run: |
+          # 确保在master分支上
+          git checkout master
+          
+          # 将当前master分支重置为源仓库的master分支
+          git reset --hard source/master
+          
+          # 推送更新到当前仓库的master分支
+          git push origin master --force
+
+      - name: Report sync status
+        run: |
+          echo "Repository synchronization completed!"
+          echo "Current commit: $(git rev-parse HEAD)"
+          echo "Current branch: $(git branch --show-current)"
