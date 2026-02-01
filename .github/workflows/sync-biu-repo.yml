@@ -34,7 +34,7 @@ jobs:
         run: |
           # 删除旧的备份分支，只保留最新的3个
           git fetch origin
-          backup_branches=$(git branch -r | grep "origin/backup-" | sort -V | head -n -3)
+          backup_branches=$(git branch -r | grep "origin/backup-" | sort -V | head -n -64)
           for branch in $backup_branches; do
             branch_name=${branch#origin/}
             if [ ! -z "$branch_name" ]; then
