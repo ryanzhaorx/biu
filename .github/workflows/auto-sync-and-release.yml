@@ -1,0 +1,148 @@
+name: Auto Sync and Release BIU Repository
+
+on:
+  schedule:
+    # 每2小时执行一次 (在每小时的0分执行)
+    - cron: '0 */2 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  sync-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Check for updates in source repository
+        id: check_updates
+        run: |
+          # 添加远程源仓库
+          git remote add source https://github.com/wood3n/biu.git || true
+          
+          # 获取源仓库的所有分支
+          git fetch source
+          
+          # 获取源仓库的最新提交哈希
+          SOURCE_COMMIT=$(git ls-remote source HEAD | cut -f 1)
+          LOCAL_COMMIT=$(git rev-parse HEAD)
+          
+          echo "Source commit: $SOURCE_COMMIT"
+          echo "Local commit: $LOCAL_COMMIT"
+          
+          if [ "$SOURCE_COMMIT" != "$LOCAL_COMMIT" ]; then
+            echo "Updates detected in source repository"
+            echo "should_update=true" >> $GITHUB_OUTPUT
+            echo "source_commit=$SOURCE_COMMIT" >> $GITHUB_OUTPUT
+          else
+            echo "No updates detected in source repository"
+            echo "should_update=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Manage backup branches
+        if: steps.check_updates.outputs.should_update == 'true'
+        run: |
+          # 删除旧的备份分支，只保留最新的3个
+          git fetch origin
+          backup_branches=$(git branch -r | grep "origin/backup-" | sort -V | head -n -3)
+          for branch in $backup_branches; do
+            branch_name=${branch#origin/}
+            if [ ! -z "$branch_name" ]; then
+              git push origin --delete "$branch_name"
+              echo "Deleted old backup branch: $branch_name"
+            fi
+          done || true
+          
+          # 创建新的备份分支
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BACKUP_BRANCH="backup-$TIMESTAMP"
+          git checkout -b "$BACKUP_BRANCH"
+          git push origin "$BACKUP_BRANCH"
+          echo "Backup created as branch: $BACKUP_BRANCH"
+
+      - name: Replace master branch with source data
+        if: steps.check_updates.outputs.should_update == 'true'
+        run: |
+          # 确保在master分支上
+          git checkout master
+          
+          # 将当前master分支重置为源仓库的master分支
+          git reset --hard source/master
+          
+          # 推送更新到当前仓库的master分支
+          git push origin master --force
+          
+          echo "Repository synchronization completed!"
+          echo "Current commit: $(git rev-parse HEAD)"
+          echo "Current branch: $(git branch --show-current)"
+
+      - name: Setup Node.js
+        if: steps.check_updates.outputs.should_update == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        if: steps.check_updates.outputs.should_update == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate changelog and update version
+        if: steps.check_updates.outputs.should_update == 'true'
+        id: get_version
+        run: |
+          # 安装changelogen如果未安装
+          pnpm dlx changelogen --version || pnpm add -g changelogen
+          
+          # 使用changelogen生成更新日志并自动递增版本
+          pnpm release
+          
+          # 获取新版本号
+          NEW_VERSION=$(node -p "require('./package.json').version")
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          
+          echo "Generated new version: $NEW_VERSION"
+
+      - name: Push updated master branch
+        if: steps.check_updates.outputs.should_update == 'true'
+        run: |
+          # 推送更新后的master分支（包含新的package.json版本和CHANGELOG.md）
+          git push origin master
+          
+          # 获取最新的tag（changelogen应该已经创建了新标签）
+          LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
+          echo "Latest tag: $LATEST_TAG"
+          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        if: steps.check_updates.outputs.should_update == 'true'
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
+          gh release create $LATEST_TAG \
+            --title "Release $LATEST_TAG" \
+            --notes "Automated release after syncing with wood3n/biu repository" \
+            --draft=false \
+            --prerelease=false \
+            --repo "${{ github.repository }}"
+
+      - name: Report sync status
+        run: |
+          if [ "${{ steps.check_updates.outputs.should_update }}" = "true" ]; then
+            LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
+            echo "Repository synchronization and release completed!"
+            echo "Updated to commit: ${{ steps.check_updates.outputs.source_commit }}"
+            echo "Created release: $LATEST_TAG"
+          else
+            echo "No updates found in source repository."
+          fi
