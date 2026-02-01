@@ -30,9 +30,20 @@ jobs:
           # 获取源仓库的所有分支
           git fetch source
 
-      - name: Create backup of current master
+      - name: Manage backup branches
         run: |
-          # 创建备份分支以保留当前数据
+          # 删除旧的备份分支，只保留最新的3个
+          git fetch origin
+          backup_branches=$(git branch -r | grep "origin/backup-" | sort -V | head -n -3)
+          for branch in $backup_branches; do
+            branch_name=${branch#origin/}
+            if [ ! -z "$branch_name" ]; then
+              git push origin --delete "$branch_name"
+              echo "Deleted old backup branch: $branch_name"
+            fi
+          done || true
+          
+          # 创建新的备份分支
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           BACKUP_BRANCH="backup-$TIMESTAMP"
           git checkout -b "$BACKUP_BRANCH"
